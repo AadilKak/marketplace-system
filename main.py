@@ -10,13 +10,11 @@ from sqlalchemy.orm import Session
 from database import init_db, SessionLocal, VehicleListing
 
 app = FastAPI()
-
-# Automatically build/verify DB tables on script launch
-init_db()
-
+# Add this block
+# Make sure this matches your Vite dev server port
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:5173", "http://localhost:3000"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
