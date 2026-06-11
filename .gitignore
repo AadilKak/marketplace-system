@@ -1,0 +1,9 @@
+# Local SQLite database
+*.db
+
+# Python caching
+__pycache__/
+*.pyc
+
+# Environment files
+.env
