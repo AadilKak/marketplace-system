@@ -48,7 +48,11 @@ def get_db():
         yield db
     finally:
         db.close()
-
+@app.get("/api/listings")
+async def get_all_listings(db: Session = Depends(get_db)):
+    # Pulls all vehicles, newest arrivals first
+    listings = db.query(VehicleListing).order_by(VehicleListing.created_at.desc()).all()
+    return listings
 @app.post("/api/listings")
 async def receive_car_listing(listing: CarListing, db: Session = Depends(get_db)):
     print(f"\n--- Checking Pipeline for: {listing.title} ---")
