@@ -10,48 +10,54 @@ FB_PASSWORD = os.environ.get("FB_PASSWORD", "")
 SESSION_FILE = "fb_session.json"
 
 
-async def get_browser_context(playwright):
-    """Launch browser and restore saved session if available."""
-    browser = await playwright.chromium.launch(
-        headless=True,
-        args=["--no-sandbox", "--disable-dev-shm-usage"]
-    )
+def _ensure_session_file():
+    """
+    Write fb_session.json from the FB_SESSION env var if the file doesn't exist locally.
+    This lets Render (ephemeral filesystem) reconstruct the session on each boot.
+    """
+    import base64
+    env_session = os.environ.get("FB_SESSION", "")
+    if env_session and not os.path.exists(SESSION_FILE):
+        with open(SESSION_FILE, "wb") as f:
+            f.write(base64.b64decode(env_session))
+        print("Session file restored from FB_SESSION env var.")
 
-    # Restore saved cookies/session if we have one
-    if os.path.exists(SESSION_FILE):
-        context = await browser.new_context(storage_state=SESSION_FILE)
-    else:
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+    if not os.path.exists(SESSION_FILE):
+        raise RuntimeError(
+            f"No session file found at '{SESSION_FILE}' and FB_SESSION env var is not set.\n"
+            "Locally: run `python save_session.py`.\n"
+            "On Render: run `python export_session.py` locally and set FB_SESSION in Render env vars."
         )
 
+
+async def get_browser_context(playwright):
+    """Launch browser and restore saved session."""
+    _ensure_session_file()
+    headless = os.environ.get("PLAYWRIGHT_HEADLESS", "true").lower() != "false"
+    browser = await playwright.chromium.launch(
+        headless=headless,
+        args=["--no-sandbox", "--disable-dev-shm-usage"]
+    )
+    context = await browser.new_context(
+        storage_state=SESSION_FILE,
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        viewport={"width": 1280, "height": 800}
+    )
     return browser, context
 
 
-async def login_if_needed(page):
-    """Log in to Facebook with burner account if not already logged in."""
+async def verify_logged_in(page):
+    """Navigate to Facebook home and confirm we're logged in."""
     await page.goto("https://www.facebook.com", wait_until="domcontentloaded")
     await asyncio.sleep(2)
-
-    # Check if already logged in
-    if "login" not in page.url and await page.query_selector('[aria-label="Your profile"]'):
-        print("Already logged in.")
-        return True
-
-    print("Logging in to Facebook...")
-    try:
-        await page.fill('input[name="email"]', FB_EMAIL)
-        await page.fill('input[name="pass"]', FB_PASSWORD)
-        await page.click('button[name="login"]')
-        await asyncio.sleep(4)
-
-        # Save session for next time
-        await page.context.storage_state(path=SESSION_FILE)
-        print("Login successful. Session saved.")
-        return True
-    except Exception as e:
-        print(f"Login failed: {e}")
-        return False
+    if "login" in page.url or "checkpoint" in page.url:
+        # Session expired — delete stale session file
+        if os.path.exists(SESSION_FILE):
+            os.remove(SESSION_FILE)
+        raise RuntimeError(
+            "Facebook session expired. Run `python save_session.py` again to refresh it."
+        )
+    print("Session valid — logged in.")
 
 
 async def scrape_listing(listing_url: str) -> dict:
@@ -64,33 +70,28 @@ async def scrape_listing(listing_url: str) -> dict:
         page = await context.new_page()
 
         try:
-            # Login if needed
-            logged_in = await login_if_needed(page)
-            if not logged_in:
-                return {"success": False, "error": "Facebook login failed. Check FB_EMAIL and FB_PASSWORD env vars."}
+            # Verify session is still valid
+            await verify_logged_in(page)
 
             # Navigate to the listing
             print(f"Navigating to: {listing_url}")
             await page.goto(listing_url, wait_until="domcontentloaded")
             await asyncio.sleep(3)
 
-            # --- Title ---
-            title = ""
-            og_title = await page.evaluate("document.querySelector('meta[property=\"og:title\"]')?.content || ''")
-            if og_title:
-                title = og_title
-            else:
-                h1 = await page.query_selector("h1")
-                if h1:
-                    title = await h1.inner_text()
-
-            # Clean up title
             import re
-            title = re.sub(r"^\(\d+\)\s*Marketplace\s*-\s*", "", title, flags=re.IGNORECASE)
-            title = re.sub(r"\s*\|\s*Facebook$", "", title, flags=re.IGNORECASE).strip()
 
             # --- Page text for regex extraction ---
             page_text = await page.evaluate("document.body.innerText || ''")
+
+            # --- Title ---
+            # page.title() is server-rendered and reliable: "(2) 2015 Ford Explorer - $6,000 | Facebook"
+            raw_title = await page.title()
+            title = re.sub(r"^\(\d+\)\s*", "", raw_title)          # strip notification count
+            title = re.sub(r"\s*\|\s*Facebook$", "", title, flags=re.IGNORECASE)  # strip " | Facebook"
+            title = re.sub(r"\s*-\s*\$[\d,]+$", "", title)         # strip " - $6,000" from end
+            title = re.sub(r"^Marketplace\s*[-–]\s*", "", title, flags=re.IGNORECASE)  # strip "Marketplace - "
+            title = title.strip()
+            print(f"Raw page title: {raw_title!r}  →  extracted: {title!r}")
 
             # --- Price ---
             price = "Not Found"
