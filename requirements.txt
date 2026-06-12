@@ -4,3 +4,4 @@ cloudinary
 sqlalchemy
 psycopg2-binary
 pydantic
+playwright

@@ -7,3 +7,8 @@ __pycache__/
 
 # Environment files
 .env
+# Saved Facebook session (contains auth cookies — never commit)
+fb_session.json
+
+# Playwright browser cache
+.playwright/

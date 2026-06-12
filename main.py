@@ -1,13 +1,15 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List
 import cloudinary
 import cloudinary.uploader
 from sqlalchemy.orm import Session
+import os
 
 # Import our database requirements
 from database import init_db, SessionLocal, VehicleListing
+from scraper import scrape_listing
 
 app = FastAPI()
 
@@ -108,6 +110,69 @@ async def receive_car_listing(listing: CarListing, db: Session = Depends(get_db)
         "database_id": new_vehicle.id,
         "message": f"Successfully committed {listing.title} to database with {len(permanent_images)} cloud assets!"
     }
+
+class ScrapeRequest(BaseModel):
+    url: str
+    key: str  # Simple secret key to prevent unauthorized triggers
+
+SCRAPE_KEY = os.environ.get("SCRAPE_KEY", "changeme")
+
+async def run_scrape_and_save(url: str):
+    """Background task: scrape the listing then save it via the existing pipeline."""
+    data = await scrape_listing(url)
+    if not data.get("success"):
+        print(f"Scrape failed: {data.get('error')}")
+        return
+
+    # Reuse the existing save logic by building a CarListing and calling receive_car_listing
+    listing = CarListing(**data)
+    db = SessionLocal()
+    try:
+        existing = db.query(VehicleListing).filter(VehicleListing.facebook_source_url == listing.url).first()
+        if existing:
+            print(f"Already in DB: {listing.title}")
+            return
+
+        permanent_images = []
+        for fb_url in listing.images:
+            try:
+                result = cloudinary.uploader.upload(fb_url, folder=f"car_inventory/{listing.title.replace(' ', '_')}")
+                permanent_images.append(result.get("secure_url"))
+            except Exception as e:
+                print(f"Image upload failed: {e}")
+
+        new_vehicle = VehicleListing(
+            title=listing.title,
+            price=listing.price,
+            mileage=listing.mileage,
+            transmission=listing.transmission,
+            description=listing.description,
+            facebook_source_url=listing.url,
+            permanent_photos=permanent_images
+        )
+        db.add(new_vehicle)
+        db.commit()
+        print(f"Saved: {listing.title} (ID {new_vehicle.id})")
+    except Exception as e:
+        db.rollback()
+        print(f"DB error: {e}")
+    finally:
+        db.close()
+
+@app.post("/api/scrape")
+async def trigger_scrape(req: ScrapeRequest, background_tasks: BackgroundTasks):
+    """
+    Triggered from the dealer's phone shortcut.
+    Accepts a Marketplace listing URL + secret key, scrapes it in the background.
+    """
+    if req.key != SCRAPE_KEY:
+        raise HTTPException(status_code=401, detail="Invalid key.")
+    if "facebook.com/marketplace/item/" not in req.url:
+        raise HTTPException(status_code=400, detail="URL must be a Facebook Marketplace listing.")
+
+    background_tasks.add_task(run_scrape_and_save, req.url)
+    return {"status": "queued", "message": "Scraping started in background. Check inventory in ~30 seconds."}
+
 
 if __name__ == "__main__":
     import uvicorn
