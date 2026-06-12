@@ -1,5 +1,5 @@
 import os
-from sqlalchemy import create_engine, Column, Integer, String, Text, JSON, DateTime
+from sqlalchemy import create_engine, Column, Integer, String, Text, JSON, DateTime, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
@@ -37,6 +37,7 @@ class VehicleListing(Base):
     facebook_source_url = Column(Text, unique=True) # Ensures strict uniqueness
     permanent_photos = Column(JSON)  # Stores your array of Cloudinary links
     created_at = Column(DateTime, default=datetime.utcnow)
+    is_sold = Column(Boolean, default=False)
 
 def init_db():
     Base.metadata.create_all(bind=engine)

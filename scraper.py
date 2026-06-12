@@ -192,7 +192,19 @@ async def scrape_listing(listing_url: str) -> dict:
                 if len(images) == prev_count and i > 2:
                     break
 
-            print(f"Scraped '{title}' — {len(images)} images found.")
+            # --- Sold detection ---
+            sold_phrases = [
+                "mark as available",
+                "this listing has been marked as sold",
+                "this listing is no longer available",
+                "item has been sold",
+            ]
+            page_text_lower = page_text.lower()
+            is_sold = any(phrase in page_text_lower for phrase in sold_phrases)
+            if is_sold:
+                print(f"Listing is SOLD: {title}")
+
+            print(f"Scraped '{title}' — {len(images)} images, sold={is_sold}")
             return {
                 "success": True,
                 "timestamp": __import__("datetime").datetime.utcnow().isoformat(),
@@ -202,7 +214,8 @@ async def scrape_listing(listing_url: str) -> dict:
                 "mileage": mileage,
                 "transmission": transmission,
                 "description": description or "No description found.",
-                "images": images[:40]
+                "images": images[:40],
+                "is_sold": is_sold,
             }
 
         except Exception as e:

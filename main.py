@@ -148,16 +148,51 @@ async def run_scrape_and_save(url: str):
             transmission=listing.transmission,
             description=listing.description,
             facebook_source_url=listing.url,
-            permanent_photos=permanent_images
+            permanent_photos=permanent_images,
+            is_sold=data.get("is_sold", False),
         )
         db.add(new_vehicle)
         db.commit()
-        print(f"Saved: {listing.title} (ID {new_vehicle.id})")
+        print(f"Saved: {listing.title} (ID {new_vehicle.id}), sold={new_vehicle.is_sold}")
     except Exception as e:
         db.rollback()
         print(f"DB error: {e}")
     finally:
         db.close()
+
+
+async def check_sold_status(vehicle_id: int, url: str):
+    """Re-scrape a listing just to check sold status and update DB."""
+    from scraper import scrape_listing
+    result = await scrape_listing(url)
+    if not result.get("success"):
+        print(f"Sold check failed for ID {vehicle_id}: {result.get('error')}")
+        return
+    db = SessionLocal()
+    try:
+        vehicle = db.query(VehicleListing).filter(VehicleListing.id == vehicle_id).first()
+        if vehicle:
+            vehicle.is_sold = result.get("is_sold", False)
+            db.commit()
+            print(f"Updated sold status: ID {vehicle_id} → sold={vehicle.is_sold}")
+    finally:
+        db.close()
+
+
+@app.post("/api/sync-sold")
+async def sync_sold(background_tasks: BackgroundTasks, key: str = ""):
+    """Re-check sold status for all listings. Pass ?key=YOUR_KEY."""
+    if key != SCRAPE_KEY:
+        raise HTTPException(status_code=401, detail="Invalid key.")
+    db = SessionLocal()
+    try:
+        listings = db.query(VehicleListing).all()
+        for v in listings:
+            background_tasks.add_task(check_sold_status, v.id, v.facebook_source_url)
+        return {"status": "queued", "message": f"Checking sold status for {len(listings)} listings."}
+    finally:
+        db.close()
+
 
 @app.post("/api/scrape")
 async def trigger_scrape(req: ScrapeRequest, background_tasks: BackgroundTasks):
