@@ -41,3 +41,9 @@ class VehicleListing(Base):
 
 def init_db():
     Base.metadata.create_all(bind=engine)
+    # Add new columns that don't exist yet (safe to run on every startup)
+    with engine.connect() as conn:
+        conn.execute(__import__("sqlalchemy").text(
+            "ALTER TABLE listings ADD COLUMN IF NOT EXISTS is_sold BOOLEAN DEFAULT FALSE"
+        ))
+        conn.commit()
