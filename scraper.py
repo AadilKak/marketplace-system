@@ -120,84 +120,70 @@ async def scrape_listing(listing_url: str) -> dict:
             else:
                 description = page_text[:500]  # Fallback: first 500 chars
 
-            # --- Photos: click through carousel ---
-            images = []
+            # --- Photos: collect all scontent images then click through carousel ---
             seen_srcs = set()
+            images = []
 
-            async def capture_images():
-                img_srcs = await page.evaluate("""
-                    () => Array.from(document.querySelectorAll('img'))
-                        .filter(img => img.src.includes('scontent') && img.naturalWidth >= 50 && img.naturalHeight >= 50)
-                        .map(img => img.src)
-                """)
-                for src in img_srcs:
+            def collect_new(srcs):
+                for src in srcs:
                     if src not in seen_srcs:
                         seen_srcs.add(src)
                         images.append(src)
 
-            await capture_images()
-
-            # Click through carousel up to 40 times
-            for i in range(40):
-                # Try to find a Next button near the main image
-                next_btn = await page.evaluate("""
-                    () => {
-                        const btns = Array.from(document.querySelectorAll('div[role="button"], button, [aria-label*="Next"], [aria-label*="next"]'));
-                        const mainImg = Array.from(document.querySelectorAll('img'))
-                            .filter(img => img.naturalWidth > 250)
-                            .sort((a, b) => (b.getBoundingClientRect().width * b.getBoundingClientRect().height) - (a.getBoundingClientRect().width * a.getBoundingClientRect().height))[0];
-                        if (!mainImg) return null;
-                        const imgRect = mainImg.getBoundingClientRect();
-                        const midY = imgRect.top + imgRect.height / 2;
-                        const btn = btns.find(el => {
-                            const r = el.getBoundingClientRect();
-                            if (r.width === 0 || r.width > 120) return false;
-                            const cx = r.left + r.width / 2;
-                            const cy = r.top + r.height / 2;
-                            return Math.abs(cy - midY) < 120 && cx > imgRect.left + imgRect.width * 0.5;
-                        });
-                        return btn ? true : false;
-                    }
-                """)
-
-                if next_btn:
-                    await page.evaluate("""
-                        () => {
-                            const btns = Array.from(document.querySelectorAll('div[role="button"], button, [aria-label*="Next"], [aria-label*="next"]'));
-                            const mainImg = Array.from(document.querySelectorAll('img'))
-                                .filter(img => img.naturalWidth > 250)
-                                .sort((a, b) => (b.getBoundingClientRect().width * b.getBoundingClientRect().height) - (a.getBoundingClientRect().width * a.getBoundingClientRect().height))[0];
-                            if (!mainImg) return;
-                            const imgRect = mainImg.getBoundingClientRect();
-                            const midY = imgRect.top + imgRect.height / 2;
-                            const btn = btns.find(el => {
-                                const r = el.getBoundingClientRect();
-                                if (r.width === 0 || r.width > 120) return false;
-                                const cx = r.left + r.width / 2;
-                                const cy = r.top + r.height / 2;
-                                return Math.abs(cy - midY) < 120 && cx > imgRect.left + imgRect.width * 0.5;
-                            });
-                            if (btn) btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+            GRAB_JS = """
+                () => Array.from(document.querySelectorAll('img'))
+                    .filter(img => img.src.includes('scontent'))
+                    .map(img => img.src)
+            """
+            NEXT_JS = """
+                () => {
+                    const candidates = Array.from(document.querySelectorAll(
+                        '[aria-label="Next photo"], [aria-label="Next image"], ' +
+                        '[aria-label="Next"], div[role="button"]'
+                    ));
+                    for (const el of candidates) {
+                        const r = el.getBoundingClientRect();
+                        if (r.width > 0 && r.width < 100 && r.right > window.innerWidth / 2) {
+                            el.dispatchEvent(new MouseEvent('click', {bubbles: true}));
+                            return true;
                         }
-                    """)
-                else:
-                    # Fallback: arrow key
-                    await page.keyboard.press("ArrowRight")
+                    }
+                    return false;
+                }
+            """
 
-                await asyncio.sleep(0.9)
-                prev_count = len(images)
-                await capture_images()
+            print("Collecting photos...")
+            try:
+                collect_new(await page.evaluate(GRAB_JS))
+                for i in range(40):
+                    prev = len(images)
+                    try:
+                        await page.evaluate(NEXT_JS)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.7)
+                    try:
+                        collect_new(await page.evaluate(GRAB_JS))
+                    except Exception:
+                        pass
+                    if len(images) == prev and i > 3:
+                        break
+            except Exception as photo_err:
+                print(f"Photo collection error (continuing): {photo_err}")
 
-                # Stop if no new images appeared
-                if len(images) == prev_count and i > 2:
-                    break
+            print(f"Photos collected: {len(images)}")
 
-            # --- Sold detection ---
+            # --- Sold detection --- (re-read page text now that page is fully loaded)
+            try:
+                page_text = await page.evaluate("document.body.innerText || ''")
+            except Exception:
+                pass
             sold_phrases = [
                 "mark as available",
                 "this listing has been marked as sold",
                 "this listing is no longer available",
                 "item has been sold",
+                "seller marked this as sold",
             ]
             page_text_lower = page_text.lower()
             is_sold = any(phrase in page_text_lower for phrase in sold_phrases)
